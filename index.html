@@ -1,0 +1,239 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Base Pump & On-chain Monitor</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <img src="icon.png" class="logo" alt="icon" />
+      <div>
+        <h1>Base Chain — Pump & On-chain Monitor</h1>
+        <p class="muted">Auto-updating: Gainers, Losers, Pump Alerts & DEX / Whale data</p>
+      </div>
+    </header>
+
+    <section class="controls">
+      <label>Refresh (sec): <input id="refreshSec" type="number" min="5" value="10" /></label>
+      <label>Pump Threshold %: <input id="pumpThreshold" type="number" min="1" value="25" /></label>
+      <label>Whale Tx Threshold (h24 buys/sells): <input id="whaleThreshold" type="number" min="1" value="100" /></label>
+      <button id="refreshBtn">Refresh Now</button>
+    </section>
+
+    <main>
+      <section id="alerts" class="alerts"></section>
+
+      <section class="grid">
+        <div class="panel" id="gainers">
+          <h2>🔥 Top Gainers (Base)</h2>
+          <div id="gainer-list">Loading...</div>
+        </div>
+
+        <div class="panel" id="losers">
+          <h2>🔻 Top Losers (Base)</h2>
+          <div id="loser-list">Loading...</div>
+        </div>
+      </section>
+
+      <section class="panel" id="details">
+        <h2>🔎 Token Details (DEX & Whale)</h2>
+        <div id="detail-list">Select a token card to load DEX / whale data</div>
+      </section>
+
+    </main>
+
+    <footer>Built for Farcaster MiniApps · Uses CoinGecko & Dexscreener public APIs</footer>
+  </div>
+
+<script>
+const COINGECKO_MARKETS = 'https://api.coingecko.com/api/v3/coins/markets';
+const DEXSCREENER_TOKEN = 'https://api.dexscreener.com/latest/dex/tokens/';
+let refreshHandle = null;
+
+function showAlert(msg, type='info') {
+  const a = document.createElement('div');
+  a.className = 'alert ' + type;
+  a.innerText = msg;
+  document.getElementById('alerts').prepend(a);
+  setTimeout(()=> a.remove(), 15000);
+}
+
+function safeNum(v){ return (v === null || v === undefined) ? '-' : v; }
+
+async function fetchMarkets(order='percent_change_24h_desc', per_page=20) {
+  const url = `${COINGECKO_MARKETS}?vs_currency=usd&category=base-ecosystem&order=${order}&per_page=${per_page}&page=1&price_change_percentage=24h`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('CoinGecko error ' + res.status);
+  return await res.json();
+}
+
+function pickAddressFromPlatforms(platforms) {
+  if(!platforms) return null;
+  // Try common keys including 'base' or tokens with address-like values
+  const keys = Object.keys(platforms);
+  if(keys.length === 0) return null;
+  // Prefer keys containing 'base'
+  for(const k of keys) {
+    if(k.toLowerCase().includes('base') && platforms[k]) return platforms[k];
+  }
+  // fallback: return first non-empty address (string with 0x...)
+  for(const k of keys) {
+    const v = platforms[k];
+    if(typeof v === 'string' && v.startsWith('0x')) return v;
+  }
+  return null;
+}
+
+function pumpBadge(token, threshold) {
+  try{
+    const val = Number(token.price_change_percentage_24h);
+    if(isFinite(val) && val > threshold) return '<span class="badge pump">🔥 PUMP ALERT</span>';
+  }catch(e){}
+  return '';
+}
+
+function whaleBadge(buys, sells, threshold) {
+  if(buys >= threshold) return '🐋 Whale Buys';
+  if(sells >= threshold) return '🐋 Whale Sells';
+  return '';
+}
+
+function makeTokenCard(token, opts={threshold:25, whaleThreshold:100}){
+  const price = safeNum(token.current_price);
+  const change = (token.price_change_percentage_24h===null)?'-':Number(token.price_change_percentage_24h).toFixed(2)+'%';
+  const addr = pickAddressFromPlatforms(token.platforms);
+  return `
+    <div class="token-card" data-id="${token.id}" data-addr="${addr || ''}">
+      <div class="row top">
+        <div class="title">${token.market_cap_rank ? '#'+token.market_cap_rank+' ' : ''}${token.name} (${token.symbol.toUpperCase()})</div>
+        <div class="meta">${pumpBadge(token, opts.threshold)}</div>
+      </div>
+      <div class="row">
+        <div class="price">$${price}</div>
+        <div class="change">${change}</div>
+      </div>
+      <div class="row small">
+        <div>Market Cap: ${safeNum(token.market_cap)}</div>
+        <div>24h Vol: ${safeNum(token.total_volume)}</div>
+      </div>
+      <div class="row small">Contract: ${addr ? addr : '<span class="muted">n/a</span>'}</div>
+    </div>
+  `;
+}
+
+async function loadAll() {
+  try {
+    const per = 25;
+    const g = await fetchMarkets('percent_change_24h_desc', per);
+    const l = await fetchMarkets('percent_change_24h_asc', per);
+
+    const pumpThreshold = Number(document.getElementById('pumpThreshold').value || 25);
+    const whaleThreshold = Number(document.getElementById('whaleThreshold').value || 100);
+
+    document.getElementById('gainer-list').innerHTML = g.map(t=> makeTokenCard(t,{threshold:pumpThreshold, whaleThreshold})).join('') || 'No data';
+    document.getElementById('loser-list').innerHTML = l.map(t=> makeTokenCard(t,{threshold:pumpThreshold, whaleThreshold})).join('') || 'No data';
+
+    // attach click handlers to load DEX data when a card clicked
+    document.querySelectorAll('.token-card').forEach(card=>{
+      card.onclick = async ()=> {
+        const id = card.getAttribute('data-id');
+        const addr = card.getAttribute('data-addr');
+        document.getElementById('detail-list').innerHTML = '<div class="loading">Loading DEX & whale data...</div>';
+        try {
+          if(!addr) {
+            document.getElementById('detail-list').innerHTML = '<div class="muted">No contract address available from CoinGecko for this token. DEX data requires an address.</div>';
+            return;
+          }
+          const dex = await loadDexData(addr);
+          renderDetail(tokenFromId(id, g.concat(l)), dex);
+        } catch(err) {
+          document.getElementById('detail-list').innerHTML = '<div class="muted">DEX data error: '+err.message+'</div>';
+        }
+      };
+    });
+
+    // auto pump alert notifications for any token exceeding threshold
+    const alerts = [];
+    g.forEach(t=>{
+      if(Number(t.price_change_percentage_24h) > pumpThreshold) alerts.push(`${t.name} +${Number(t.price_change_percentage_24h).toFixed(2)}%`);
+    });
+    if(alerts.length) showAlert('PUMP ALERT: ' + alerts.join(', '), 'danger');
+  } catch(e){
+    showAlert('Error loading markets: ' + e.message, 'danger');
+  }
+}
+
+function tokenFromId(id, list){
+  return list.find(x=> x.id === id) || null;
+}
+
+async function loadDexData(tokenAddress) {
+  // tokenAddress expected as hex or tokenId accepted by Dexscreener.
+  // Dexscreener token endpoint needs token in form <chain>/<address> or just address for some chains.
+  // We'll try a few common variants for Base chain (use "base:" prefix then address)
+  const attempts = [
+    tokenAddress,
+    tokenAddress.replace('0x',''), // raw
+    `base:${tokenAddress}`,
+    `ethereum:${tokenAddress}`
+  ];
+  for(const a of attempts){
+    try {
+      const url = DEXSCREENER_TOKEN + a;
+      const res = await fetch(url);
+      if(!res.ok) continue;
+      const data = await res.json();
+      if(data && data.pairs && data.pairs.length) {
+        // pick top pair by liquidity
+        const sorted = data.pairs.sort((a,b)=> (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+        const p = sorted[0];
+        return {
+          dex: p.dexId,
+          pair: p.pairAddress,
+          liquidity: p.liquidity?.usd || 0,
+          volume24h: p.volume?.h24 || 0,
+          buys: p.txns?.h24?.buys || 0,
+          sells: p.txns?.h24?.sells || 0,
+          pairUrl: p.explorerPairUrl || p.pairAddress
+        };
+      }
+    } catch(e){ /* try next */ }
+  }
+  throw new Error('No DEX pairs found on Dexscreener for this token');
+}
+
+function renderDetail(token, dex) {
+  const whaleThreshold = Number(document.getElementById('whaleThreshold').value || 100);
+  const parts = [];
+  parts.push(`<h3>${token.name} (${token.symbol.toUpperCase()})</h3>`);
+  if(dex) {
+    parts.push(`<div class="dex-row">DEX: <strong>${dex.dex}</strong> | Liquidity: $${Number(dex.liquidity).toLocaleString()} | 24h Vol: $${Number(dex.volume24h).toLocaleString()}</div>`);
+    parts.push(`<div>Pair: ${dex.pair} <br/> Pair URL: ${dex.pairUrl || 'n/a'}</div>`);
+    parts.push(`<div>Buys (24h): ${dex.buys} | Sells (24h): ${dex.sells}</div>`);
+    const whaleMsg = whaleBadge(dex.buys, dex.sells, whaleThreshold);
+    if(whaleMsg) parts.push(`<div class="whale">`+whaleMsg+`</div>`);
+  } else {
+    parts.push('<div class="muted">No DEX data available</div>');
+  }
+  document.getElementById('detail-list').innerHTML = parts.join('');
+}
+
+function startAutoRefresh() {
+  if(refreshHandle) clearInterval(refreshHandle);
+  const sec = Math.max(5, Number(document.getElementById('refreshSec').value || 10));
+  loadAll();
+  refreshHandle = setInterval(loadAll, sec * 1000);
+}
+
+document.getElementById('refreshBtn').addEventListener('click', ()=> startAutoRefresh());
+document.getElementById('refreshSec').addEventListener('change', ()=> startAutoRefresh());
+
+// start on load
+startAutoRefresh();
+</script>
+</body>
+</html>

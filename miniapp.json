@@ -1,0 +1,7 @@
+{
+  "name": "Base Pump & On-chain Monitor",
+  "description": "Top Gainers, Top Losers, Pump Alerts, and DEX/Whale data for Base chain. Auto-updating.",
+  "icon": "https://airf941.github.io/crypto-tracker-miniapp/icon.png",
+  "url": "https://airf941.github.io/crypto-tracker-miniapp/",
+  "version": "1.1.0"
+}
